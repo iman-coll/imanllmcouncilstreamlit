@@ -4,98 +4,121 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
-PANEL_ORDER = ["openai", "anthropic", "google", "groq"]
+PANEL_ORDER = ["google", "groq"]
 
 DEMO_LINES = {
-    "openai": "Demo mode — add an OPENAI_API_KEY to hear from this panelist. Focus the brief on one clear audience, one clear action, and remove anything that does not serve either.",
-    "anthropic": "Demo mode — add an ANTHROPIC_API_KEY to hear from this panelist. Lead with the strongest proof point, keep the structure scannable, and make the next step obvious.",
     "google": "Demo mode — enter a Gemini API key in the sidebar to make this panelist live.",
     "groq": "Demo mode — enter a Groq API key in the sidebar to make this panelist live.",
 }
 
 
-def secret(name, default="", runtime_key=""):
-    if runtime_key:
-        return runtime_key
+def secret(name: str, default: str = "") -> str:
     try:
         import streamlit as st
-        if name in st.secrets and st.secrets[name]:
-            return str(st.secrets[name])
+        value = st.secrets.get(name, "")
+        if value:
+            return str(value)
     except Exception:
         pass
     return os.environ.get(name, default)
 
 
-def demo(provider, model):
+def demo(provider: str, model: str) -> dict:
     return {"provider": provider, "model": model, "answer": DEMO_LINES[provider], "error": None, "demo": True}
 
 
-def call_openai(q, system):
-    model = secret("OPENAI_MODEL", "gpt-4o-mini")
-    key = secret("OPENAI_API_KEY")
-    if not key: return demo("openai", f"OpenAI · {model}")
-    try:
-        r = requests.post("https://api.openai.com/v1/chat/completions", headers={"Authorization": f"Bearer {key}"}, json={"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": q}], "temperature": 0.7, "max_tokens": 500}, timeout=45)
-        d = r.json(); r.raise_for_status()
-        return {"provider": "openai", "model": f"OpenAI · {model}", "answer": d["choices"][0]["message"]["content"].strip(), "error": None, "demo": False}
-    except Exception as e: return {"provider": "openai", "model": f"OpenAI · {model}", "answer": None, "error": str(e), "demo": False}
-
-
-def call_anthropic(q, system):
-    model = secret("ANTHROPIC_MODEL", "claude-sonnet-5"); key = secret("ANTHROPIC_API_KEY")
-    if not key: return demo("anthropic", f"Anthropic · {model}")
-    try:
-        r = requests.post("https://api.anthropic.com/v1/messages", headers={"x-api-key": key, "anthropic-version": "2023-06-01"}, json={"model": model, "system": system, "max_tokens": 500, "messages": [{"role": "user", "content": q}]}, timeout=45)
-        d = r.json(); r.raise_for_status()
-        return {"provider": "anthropic", "model": f"Anthropic · {model}", "answer": d["content"][0]["text"].strip(), "error": None, "demo": False}
-    except Exception as e: return {"provider": "anthropic", "model": f"Anthropic · {model}", "answer": None, "error": str(e), "demo": False}
-
-
-def call_google(q, system, runtime_key=""):
+def call_google(question: str, system: str, api_key: str = "") -> dict:
     model = secret("GOOGLE_MODEL", "gemini-2.5-flash")
-    key = secret("GOOGLE_API_KEY", runtime_key=runtime_key)
-    if not key: return demo("google", f"Google · {model}")
+    key = str(api_key or secret("GOOGLE_API_KEY") or "").strip()
+    if not key:
+        return demo("google", f"Google · {model}")
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-        r = requests.post(url, json={"contents": [{"parts": [{"text": q}]}], "systemInstruction": {"parts": [{"text": system}]}, "generationConfig": {"maxOutputTokens": 500, "temperature": 0.7}}, timeout=45)
-        d = r.json(); r.raise_for_status()
-        parts = d.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        answer = "".join(x.get("text", "") for x in parts).strip()
-        if not answer: raise RuntimeError("Empty response")
+        payload = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": [{"text": question}]}],
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 700},
+        }
+        response = requests.post(url, json=payload, timeout=45)
+        data = response.json()
+        response.raise_for_status()
+        candidates = data.get("candidates") or []
+        parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+        answer = "".join(str(part.get("text", "")) for part in parts).strip()
+        if not answer:
+            raise RuntimeError("Gemini returned an empty response.")
         return {"provider": "google", "model": f"Google · {model}", "answer": answer, "error": None, "demo": False}
-    except Exception as e: return {"provider": "google", "model": f"Google · {model}", "answer": None, "error": str(e), "demo": False}
+    except Exception as exc:
+        return {"provider": "google", "model": f"Google · {model}", "answer": None, "error": f"Gemini: {exc}", "demo": False}
 
 
-def call_groq(q, system, runtime_key=""):
+def call_groq(question: str, system: str, api_key: str = "") -> dict:
     model = secret("GROQ_MODEL", "openai/gpt-oss-120b")
-    key = secret("GROQ_API_KEY", runtime_key=runtime_key)
-    if not key: return demo("groq", f"Groq · {model}")
+    key = str(api_key or secret("GROQ_API_KEY") or "").strip()
+    if not key:
+        return demo("groq", f"Groq · {model}")
     try:
-        r = requests.post("https://api.groq.com/openai/v1/chat/completions", headers={"Authorization": f"Bearer {key}"}, json={"model": model, "messages": [{"role": "system", "content": system}, {"role": "user", "content": q}], "temperature": 0.7, "max_tokens": 500}, timeout=45)
-        d = r.json(); r.raise_for_status()
-        return {"provider": "groq", "model": f"Groq · {model}", "answer": d["choices"][0]["message"]["content"].strip(), "error": None, "demo": False}
-    except Exception as e: return {"provider": "groq", "model": f"Groq · {model}", "answer": None, "error": str(e), "demo": False}
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": question}],
+                "temperature": 0.7,
+                "max_tokens": 700,
+            },
+            timeout=45,
+        )
+        data = response.json()
+        response.raise_for_status()
+        choices = data.get("choices") or []
+        answer = choices[0].get("message", {}).get("content", "") if choices else ""
+        answer = str(answer).strip()
+        if not answer:
+            raise RuntimeError("Groq returned an empty response.")
+        return {"provider": "groq", "model": f"Groq · {model}", "answer": answer, "error": None, "demo": False}
+    except Exception as exc:
+        return {"provider": "groq", "model": f"Groq · {model}", "answer": None, "error": f"Groq: {exc}", "demo": False}
 
 
-def run_council(question, mode="general", google_key="", groq_key=""):
-    system = ("You are a practical AI advisor. Give a clear, structured recommendation in 120-180 words. Take a position." if mode == "general" else "You are a senior UI/UX reviewer. Critique usability, hierarchy, accessibility and clarity. Give 3-5 concrete recommendations in 120-180 words.")
+def run_council(question: str, mode: str = "general", google_key: str = "", groq_key: str = "") -> dict:
+    question = str(question or "").strip()
+    mode = str(mode or "general")
+    system = (
+        "You are a senior UI/UX reviewer. Critique usability, hierarchy, accessibility and clarity. "
+        "Give 3-5 concrete recommendations in 120-180 words. Take a clear position."
+        if mode == "uiux" else
+        "You are a practical AI advisor. Give a clear, structured recommendation in 120-180 words. "
+        "Take a clear position and include concrete next steps."
+    )
 
     callers = {
-        "openai": lambda: call_openai(question, system),
-        "anthropic": lambda: call_anthropic(question, system),
         "google": lambda: call_google(question, system, google_key),
         "groq": lambda: call_groq(question, system, groq_key),
     }
 
     responses = []
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        jobs = {ex.submit(callers[p]): p for p in PANEL_ORDER}
-        for job in as_completed(jobs):
-            responses.append(job.result())
-    responses.sort(key=lambda x: PANEL_ORDER.index(x["provider"]))
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {executor.submit(fn): provider for provider, fn in callers.items()}
+        for future in as_completed(futures):
+            provider = futures[future]
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = {"provider": provider, "model": provider.title(), "answer": None, "error": str(exc), "demo": False}
+            responses.append(result)
 
-    live = [r for r in responses if not r.get("demo") and not r.get("error")]
-    suggestions = {r["provider"]: ("Strengthen the recommendation with a measurable outcome and one concrete next step." if not r.get("demo") else "Add the provider API key to replace this demo response with a live panelist.") for r in responses}
+    responses.sort(key=lambda item: PANEL_ORDER.index(item["provider"]))
+    live = [r for r in responses if not r.get("demo") and not r.get("error") and r.get("answer")]
+
+    suggestions = {}
+    for item in responses:
+        if item.get("error"):
+            suggestions[item["provider"]] = "Check that the API key is valid and the selected model is available."
+        elif item.get("demo"):
+            suggestions[item["provider"]] = "Enter this provider's API key to replace the demo response with a live panelist."
+        else:
+            suggestions[item["provider"]] = "Strengthen the recommendation with a measurable outcome and one concrete next step."
 
     if live:
         verdict = "The council recommends combining the strongest concrete recommendation from each live panelist, prioritizing clarity, audience fit, and an explicit next action."
